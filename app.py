@@ -4,9 +4,8 @@ import numpy as np
 import joblib
 import os
 from datetime import datetime, timedelta
-
-# Handle plotly import with graceful fallback
-
+import plotly.express as px
+import plotly.graph_objects as go
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.cluster import KMeans, DBSCAN
@@ -95,6 +94,131 @@ class EnhancedCardPatternAnalyzer:
             return f"{bank_id}**{rest_hash}"
         else:
             return hashlib.md5(card_str.encode()).hexdigest()[:12]
+    
+    def get_enhanced_card_risk_profile(self, customer_id, card_number, amount, hour, timestamp=None):
+        hashed_card = self.hash_card_number(card_number)
+        patterns = self.customer_card_patterns[customer_id]
+        
+        if timestamp is None:
+            timestamp = pd.Timestamp.now()
+        
+        # Simplified risk profile for single transaction
+        risk_profile = {
+            'familiarity_score': 0.1,  # Assume new card
+            'frequency_score': 0.1,
+            'amount_consistency_score': 0.5,
+            'temporal_consistency_score': 0.5,
+            'recency_score': 0.0,
+            'fraud_history_score': 0.5,
+            'global_reputation_score': 0.5,
+            'is_new_card': True,
+            'is_suspicious_card': False,
+            'is_trusted_card': False,
+            'is_unusual_time': hour in [0, 1, 2, 3, 22, 23],
+            'is_high_amount_card': False,
+            'overall_card_risk': 0.6,  # Default risk for new card
+            'risk_factors': ['New card for customer'],
+            'protective_factors': []
+        }
+        
+        return risk_profile
+    
+    def get_customer_card_summary(self, customer_id):
+        patterns = self.customer_card_patterns[customer_id]
+        return {
+            'total_cards': patterns['total_unique_cards'],
+            'active_cards': 0,
+            'trusted_cards': len(patterns['trusted_cards']),
+            'suspicious_cards': len(patterns['suspicious_cards']),
+            'new_cards': len(patterns['new_cards_last_30_days']),
+            'risk_level': 'MEDIUM'
+        }
+
+class EnhancedFraudDetector:
+    """Recreation of the main fraud detector class"""
+    
+    def __init__(self):
+        self.scaler = RobustScaler()
+        self.kmeans = None
+        self.dbscan = DBSCAN(eps=0.7, min_samples=3)
+        self.isolation_forest = IsolationForest(random_state=42, contamination=0.08)
+        self.rf_classifier = RandomForestClassifier(
+            n_estimators=150,
+            max_depth=12,
+            min_samples_split=4,
+            min_samples_leaf=2,
+            random_state=42,
+            class_weight='balanced'
+        )
+        self.pca = PCA(n_components=3)
+        self.high_risk_clusters = []
+        self.threshold = 0.5
+        self.features = [
+            'amount', 'avg_amount', 'max_amount', 'min_amount',
+            'std_amount', 'transaction_count', 'amount_to_avg_ratio',
+            'amount_to_max_ratio', 'total_amount', 'transaction_frequency',
+            'days_since_last_transaction',
+            'transaction_hour', 'hour_risk_score', 'is_high_risk_hour',
+            'is_peak_fraud_hour', 'time_pattern_consistency',
+            'card_familiarity_score', 'card_frequency_score',
+            'card_amount_consistency', 'card_temporal_consistency',
+            'card_recency_score', 'card_fraud_history_score',
+            'is_new_card', 'is_trusted_card', 'is_suspicious_card',
+            'card_global_reputation', 'card_usage_diversity'
+        ]
+        self.customer_stats_overall = None
+        self.card_analyzer = EnhancedCardPatternAnalyzer()
+        self.time_patterns = {
+            'hourly_fraud_rates': defaultdict(lambda: {'total': 0, 'fraud': 0}),
+            'customer_hour_patterns': defaultdict(lambda: defaultdict(int)),
+            'global_peak_hours': set(),
+            'customer_typical_hours': defaultdict(set)
+        }
+
+class ModelLoader:
+    """Handle loading the pickle file with proper class definitions"""
+    
+    @staticmethod
+    def load_model_safe(model_path):
+        """Safely load the model by trying different approaches"""
+        
+        # First, try direct loading
+        try:
+            model_data = joblib.load(model_path)
+            return model_data, "Direct loading successful"
+        except Exception as e1:
+            st.warning(f"Direct loading failed: {str(e1)}")
+        
+        # Try with pickle
+        try:
+            with open(model_path, 'rb') as f:
+                model_data = pickle.load(f)
+            return model_data, "Pickle loading successful"
+        except Exception as e2:
+            st.warning(f"Pickle loading failed: {str(e2)}")
+        
+        # Try to load individual components
+        try:
+            model_data = joblib.load(model_path)
+            # Extract only the basic ML components we can use
+            safe_components = {}
+            
+            if isinstance(model_data, dict):
+                for key, value in model_data.items():
+                    try:
+                        if key in ['scaler', 'kmeans', 'isolation_forest', 'rf_classifier', 
+                                 'pca', 'threshold', 'features', 'high_risk_clusters']:
+                            safe_components[key] = value
+                    except:
+                        continue
+            
+            if safe_components:
+                return safe_components, "Partial loading successful"
+            
+        except Exception as e3:
+            st.warning(f"Component extraction failed: {str(e3)}")
+        
+        return None, "All loading methods failed"
 
 class EnhancedFraudDetectorWrapper:
     """Wrapper for the enhanced fraud detector model"""
@@ -687,51 +811,6 @@ class EnhancedFraudDetectorWrapper:
         
         return reasons
 
-class ModelLoader:
-    """Handle loading the pickle file with proper class definitions"""
-    
-    @staticmethod
-    def load_model_safe(model_path):
-        """Safely load the model by trying different approaches"""
-        
-        # First, try direct loading
-        try:
-            model_data = joblib.load(model_path)
-            return model_data, "Direct loading successful"
-        except Exception as e1:
-            st.warning(f"Direct loading failed: {str(e1)}")
-        
-        # Try with pickle
-        try:
-            with open(model_path, 'rb') as f:
-                model_data = pickle.load(f)
-            return model_data, "Pickle loading successful"
-        except Exception as e2:
-            st.warning(f"Pickle loading failed: {str(e2)}")
-        
-        # Try to load individual components
-        try:
-            model_data = joblib.load(model_path)
-            # Extract only the basic ML components we can use
-            safe_components = {}
-            
-            if isinstance(model_data, dict):
-                for key, value in model_data.items():
-                    try:
-                        if key in ['scaler', 'kmeans', 'isolation_forest', 'rf_classifier', 
-                                 'pca', 'threshold', 'features', 'high_risk_clusters']:
-                            safe_components[key] = value
-                    except:
-                        continue
-            
-            if safe_components:
-                return safe_components, "Partial loading successful"
-            
-        except Exception as e3:
-            st.warning(f"Component extraction failed: {str(e3)}")
-        
-        return None, "All loading methods failed"
-
 # Model loading function
 @st.cache_resource
 def load_enhanced_model():
@@ -787,114 +866,30 @@ def validate_inputs(user_id, amount, receiver_card):
     return errors
 
 def create_fraud_visualization(result):
-    """Create visualization for fraud detection result with fallback"""
-    fraud_prob = result['fraud_probability'] * 100
-    
-    if PLOTLY_AVAILABLE:
-        # Use Plotly gauge chart
-        fig_gauge = go.Figure(go.Indicator(
-            mode = "gauge+number",
-            value = fraud_prob,
-            domain = {'x': [0, 1], 'y': [0, 1]},
-            title = {'text': "Fraud Probability (%)"},
-            gauge = {
-                'axis': {'range': [None, 100]},
-                'bar': {'color': "darkblue"},
-                'steps': [
-                    {'range': [0, 30], 'color': "lightgreen"},
-                    {'range': [30, 50], 'color': "yellow"},
-                    {'range': [50, 70], 'color': "orange"},
-                    {'range': [70, 100], 'color': "red"}
-                ],
-                'threshold': {
-                    'line': {'color': "red", 'width': 4},
-                    'thickness': 0.75,
-                    'value': 50
-                }
-            }
-        ))
-        fig_gauge.update_layout(height=300)
-        return fig_gauge
-    else:
-        # Fallback visualization using Streamlit components
-        st.metric("Fraud Probability", f"{fraud_prob:.1f}%")
-        
-        # Color-coded progress bar
-        if fraud_prob < 30:
-            st.success("🟢 Low Risk")
-        elif fraud_prob < 70:
-            st.warning("🟡 Medium Risk")
-        else:
-            st.error("🔴 High Risk")
-        
-        st.progress(fraud_prob/100)
-        return None
-
-def create_component_chart(components):
-    """Create component breakdown chart with fallback"""
-    if PLOTLY_AVAILABLE:
-        component_data = {
-            'Component': ['K-Means\nClustering', 'Isolation\nForest', 'Random\nForest'],
-            'Score': [
-                components.get('kmeans_risk', 0),
-                components.get('isolation_anomaly', 0),
-                components.get('rf_probability', 0)
+    """Create visualization for fraud detection result"""
+    fig_gauge = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = result['fraud_probability'] * 100,
+        domain = {'x': [0, 1], 'y': [0, 1]},
+        title = {'text': "Fraud Probability (%)"},
+        gauge = {
+            'axis': {'range': [None, 100]},
+            'bar': {'color': "darkblue"},
+            'steps': [
+                {'range': [0, 30], 'color': "lightgreen"},
+                {'range': [30, 50], 'color': "yellow"},
+                {'range': [50, 70], 'color': "orange"},
+                {'range': [70, 100], 'color': "red"}
             ],
-            'Color': ['red' if x > 0.5 else 'green' for x in [
-                components.get('kmeans_risk', 0),
-                components.get('isolation_anomaly', 0),
-                components.get('rf_probability', 0)
-            ]]
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': 50
+            }
         }
-        
-        fig_components = px.bar(
-            pd.DataFrame(component_data),
-            x='Score',
-            y='Component',
-            orientation='h',
-            title="Individual Model Predictions",
-            color='Color',
-            color_discrete_map={'red': '#FF6B6B', 'green': '#4ECDC4'}
-        )
-        fig_components.update_layout(height=300, showlegend=False)
-        fig_components.update_xaxes(range=[0, 1])
-        return fig_components
-    else:
-        # Fallback using Streamlit bar chart
-        component_data = pd.DataFrame({
-            'K-Means': [components.get('kmeans_risk', 0)],
-            'Isolation Forest': [components.get('isolation_anomaly', 0)],
-            'Random Forest': [components.get('rf_probability', 0)]
-        })
-        st.bar_chart(component_data.T)
-        return None
-
-def create_risk_factors_chart(features):
-    """Create risk factors chart with fallback"""
-    risk_factors = {
-        'Amount Anomaly': min(features.get('amount_ratio', 1) - 1, 1),
-        'Time Risk': features.get('hour_risk', 1) / 3,
-        'Card Risk': features.get('card_risk', 0.5),
-        'History Factor': 1 - min(features.get('customer_history', 1) / 20, 1)
-    }
-    
-    if PLOTLY_AVAILABLE:
-        fig_risk = px.bar(
-            x=list(risk_factors.values()),
-            y=list(risk_factors.keys()),
-            orientation='h',
-            title="Risk Factor Contributions",
-            color=list(risk_factors.values()),
-            color_continuous_scale="Reds"
-        )
-        fig_risk.update_layout(height=300)
-        fig_risk.update_xaxes(range=[0, 1])
-        return fig_risk
-    else:
-        # Fallback using Streamlit bar chart
-        risk_df = pd.DataFrame(list(risk_factors.items()), columns=['Factor', 'Score'])
-        st.bar_chart(risk_df.set_index('Factor'))
-        return None
+    ))
+    fig_gauge.update_layout(height=300)
+    return fig_gauge
 
 def main():
     # Header
@@ -917,6 +912,7 @@ def main():
     else:
         st.sidebar.error("🔴 Model Not Loaded")
         st.sidebar.warning("Please upload your trained model file")
+    
     
     # File upload section
     if not model.is_loaded:
@@ -1085,18 +1081,75 @@ def main():
         if 'result' in locals() and result:
             # Fraud probability visualization
             fig_gauge = create_fraud_visualization(result)
+            st.plotly_chart(fig_gauge, use_container_width=True)
             
             # Risk level indicator
             fraud_prob = result['fraud_probability']
             if fraud_prob < 0.3:
                 risk_level = "🟢 LOW RISK"
+                risk_color = "green"
             elif fraud_prob < 0.7:
                 risk_level = "🟡 MEDIUM RISK"
+                risk_color = "orange"
             else:
                 risk_level = "🔴 HIGH RISK"
+                risk_color = "red"
             
             st.markdown(f"## {risk_level}")
             
+            # Component breakdown chart
+            st.subheader("🔍 Model Components")
+            components = result.get('model_components', {})
+            
+            component_data = {
+                'Component': ['K-Means\nClustering', 'Isolation\nForest', 'Random\nForest'],
+                'Score': [
+                    components.get('kmeans_risk', 0),
+                    components.get('isolation_anomaly', 0),
+                    components.get('rf_probability', 0)
+                ],
+                'Color': ['red' if x > 0.5 else 'green' for x in [
+                    components.get('kmeans_risk', 0),
+                    components.get('isolation_anomaly', 0),
+                    components.get('rf_probability', 0)
+                ]]
+            }
+            
+            fig_components = px.bar(
+                pd.DataFrame(component_data),
+                x='Score',
+                y='Component',
+                orientation='h',
+                title="Individual Model Predictions",
+                color='Color',
+                color_discrete_map={'red': '#FF6B6B', 'green': '#4ECDC4'}
+            )
+            fig_components.update_layout(height=300, showlegend=False)
+            fig_components.update_xaxes(range=[0, 1])
+            st.plotly_chart(fig_components, use_container_width=True)
+            
+            # Feature importance
+            st.subheader("📊 Key Risk Factors")
+            features = result.get('features_used', {})
+            
+            risk_factors = {
+                'Amount Anomaly': min(features.get('amount_ratio', 1) - 1, 1),
+                'Time Risk': features.get('hour_risk', 1) / 3,
+                'Card Risk': features.get('card_risk', 0.5),
+                'History Factor': 1 - min(features.get('customer_history', 1) / 20, 1)
+            }
+            
+            fig_risk = px.bar(
+                x=list(risk_factors.values()),
+                y=list(risk_factors.keys()),
+                orientation='h',
+                title="Risk Factor Contributions",
+                color=list(risk_factors.values()),
+                color_continuous_scale="Reds"
+            )
+            fig_risk.update_layout(height=300)
+            fig_risk.update_xaxes(range=[0, 1])
+            st.plotly_chart(fig_risk, use_container_width=True)
         
         else:
             st.info("👆 Enter transaction details to see analysis")
@@ -1113,7 +1166,8 @@ def main():
             with col_metric2:
                 st.metric("Recall", "92.3%", "↑ 0.8%")
                 st.metric("F1-Score", "91.0%", "↑ 1.2%")
-    
+            
+            # Model components status
     # Usage Instructions
     if not model.is_loaded or 'result' not in locals():
         st.markdown("---")
