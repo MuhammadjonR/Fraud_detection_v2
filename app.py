@@ -4,6 +4,7 @@ import numpy as np
 import joblib
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
@@ -987,7 +988,7 @@ def main():
             )
             
             # Hour input (automatic with real-time)
-            current_time = datetime.now()
+            current_time = datetime.now(ZoneInfo("Asia/Tashkent"))
             current_hour = current_time.hour
             current_minute = current_time.minute
             current_second = current_time.second
