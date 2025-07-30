@@ -220,10 +220,9 @@ class ModelLoader:
             st.warning(f"Component extraction failed: {str(e3)}")
         
         return None, "All loading methods failed"
-
+    
 class EnhancedFraudDetectorWrapper:
     """Wrapper for the enhanced fraud detector model"""
-    
     def __init__(self, model_data=None, load_status=""):
         self.model_data = model_data
         self.is_loaded = model_data is not None
@@ -487,8 +486,179 @@ class EnhancedFraudDetectorWrapper:
         else:
             return hashlib.md5(card_str.encode()).hexdigest()[:12]
     
+    def get_dynamic_threshold(self, amount, customer_stats):
+        """Calculate dynamic threshold based on transaction characteristics - FIXED"""
+        base_threshold = self.threshold  # Usually 0.5
+        
+        # Adjust threshold based on amount size
+        avg_amount = customer_stats.get('avg_amount', 100)
+        amount_ratio = amount / max(avg_amount, 1)
+        
+        # For very large amounts, lower the threshold (be more sensitive)
+        if amount_ratio > 10:  # Amount is 10x normal
+            adjusted_threshold = base_threshold * 0.3  # Very sensitive
+        elif amount_ratio > 5:  # Amount is 5x normal
+            adjusted_threshold = base_threshold * 0.6  # More sensitive
+        elif amount_ratio > 3:  # Amount is 3x normal
+            adjusted_threshold = base_threshold * 0.8  # Somewhat sensitive
+        else:
+            adjusted_threshold = base_threshold  # Normal threshold
+        
+        # Ensure threshold is within reasonable bounds
+        return max(0.2, min(0.8, adjusted_threshold))
+    
+    def calculate_fraud_score_fixed(self, predictions, amount_to_avg_ratio, amount_to_max_ratio, 
+                            amount_z_score, time_features, card_features, customer_stats, amount):
+        """Calculate composite fraud score - IMPROVED VERSION"""
+        
+        # ML models component (25%)
+        ml_score = (
+            0.4 * predictions['kmeans_high_risk'] + 
+            0.3 * predictions.get('dbscan_outlier', 0) + 
+            0.3 * predictions['isolation_anomaly']
+        )
+        
+        # Amount patterns component (35%) - INCREASED WEIGHT for large amounts
+        amount_score = 0.0
+        
+        # More aggressive scoring for large amounts
+        if amount_to_avg_ratio > 10:
+            amount_score += 1.0  # Maximum risk
+        elif amount_to_avg_ratio > 5:
+            amount_score += 0.9
+        elif amount_to_avg_ratio > 3:
+            amount_score += 0.7
+        elif amount_to_avg_ratio > 2:
+            amount_score += 0.4
+        
+        # Additional risk for very large absolute amounts
+        if amount > 5000:
+            amount_score += 0.3
+        elif amount > 2000:
+            amount_score += 0.2
+        elif amount > 1000:
+            amount_score += 0.1
+        
+        # Z-score based risk
+        if amount_z_score > 4:
+            amount_score += 0.9
+        elif amount_z_score > 3:
+            amount_score += 0.7
+        elif amount_z_score > 2:
+            amount_score += 0.4
+            
+        amount_score = min(amount_score / 2.0, 1.0)  # Normalize but allow higher scores
+        
+        # Time patterns component (15%)
+        time_score = (
+            0.4 * (time_features['hour_risk_score'] / 3.0) +
+            0.3 * time_features['is_high_risk_hour'] +
+            0.3 * (1.0 - time_features['time_pattern_consistency'])
+        )
+        time_score = min(time_score, 1.0)
+        
+        # Card patterns component (20%)
+        card_score = card_features['overall_card_risk']
+        if card_features['is_new_card']:
+            card_score = min(card_score * 1.3, 1.0)  # Reduced multiplier
+        
+        # Random Forest component (5%)
+        rf_score = predictions['rf_fraud_prob']
+        
+        # Weighted combination - ADJUSTED WEIGHTS
+        fraud_score = (
+            0.25 * ml_score +
+            0.35 * amount_score +  # Increased weight for amount
+            0.15 * time_score +    # Reduced weight for time
+            0.20 * card_score +
+            0.05 * rf_score
+        )
+        
+        # Additional boost for very suspicious combinations
+        risk_factor_count = sum([
+            1 if amount_to_avg_ratio > 5 else 0,
+            1 if card_features['is_new_card'] else 0,
+            1 if time_features['is_high_risk_hour'] else 0,
+            1 if predictions['isolation_anomaly'] else 0,
+            1 if amount > 3000 else 0
+        ])
+        
+        if risk_factor_count >= 3:
+            fraud_score = min(fraud_score * 1.2, 1.0)  # Boost for multiple risk factors
+        
+        return max(min(fraud_score, 1.0), 0.0)
+    
+    def generate_reasons_fixed(self, predictions, amount_to_avg_ratio, time_features, 
+                        card_features, fraud_score, amount, customer_stats):
+        """Generate human-readable reasons for the prediction - IMPROVED"""
+        reasons = []
+        
+        # Amount-based reasons (most important for large transactions)
+        if amount > 5000:
+            reasons.append(f"Very large transaction amount: ${amount:,.2f}")
+        elif amount > 2000:
+            reasons.append(f"Large transaction amount: ${amount:,.2f}")
+        
+        if amount_to_avg_ratio > 10:
+            reasons.append(f"Amount is {amount_to_avg_ratio:.1f}x higher than customer's average (EXTREME)")
+        elif amount_to_avg_ratio > 5:
+            reasons.append(f"Amount is {amount_to_avg_ratio:.1f}x higher than customer's average (HIGH)")
+        elif amount_to_avg_ratio > 3:
+            reasons.append(f"Amount is {amount_to_avg_ratio:.1f}x higher than customer's average")
+        
+        # ML model reasons
+        if predictions['kmeans_high_risk']:
+            reasons.append("Transaction pattern matches high-risk cluster")
+        
+        if predictions['isolation_anomaly']:
+            reasons.append("Anomalous transaction detected by isolation forest")
+        
+        # Time-based reasons
+        if time_features['is_high_risk_hour']:
+            reasons.append("Transaction during high-risk hours (late night/early morning)")
+        
+        # Card-based reasons
+        if card_features['is_new_card']:
+            reasons.append("New receiver card for this customer")
+        
+        if predictions['rf_fraud_prob'] > 0.7:
+            reasons.append(f"Random Forest model indicates high fraud probability ({predictions['rf_fraud_prob']:.1%})")
+        
+        # Card-specific reasons
+        if card_features.get('card_type_risk', 0.5) > 0.6:
+            reasons.append("High-risk card type detected")
+        
+        if card_features.get('pattern_risk', 0.5) > 0.6:
+            reasons.append("Unusual card number pattern detected")
+        
+        if card_features.get('is_suspicious_card'):
+            reasons.append("Card flagged as suspicious based on pattern analysis")
+        
+        if card_features.get('familiarity_score', 0.5) < 0.3:
+            reasons.append("Low familiarity score for this customer-card combination")
+        
+        # Customer history context
+        transaction_count = customer_stats.get('transaction_count', 1)
+        if transaction_count < 5:
+            reasons.append(f"Limited customer history ({transaction_count} previous transactions)")
+        
+        # Overall assessment
+        if fraud_score > 0.8:
+            reasons.append("Multiple high-risk factors detected - EXTREME RISK")
+        elif fraud_score > 0.6:
+            reasons.append("Multiple risk factors detected - HIGH RISK")
+        elif fraud_score > 0.4:
+            reasons.append("Some risk factors detected - MEDIUM RISK")
+        elif fraud_score < 0.3:
+            reasons.append("Transaction appears consistent with customer patterns")
+        
+        # Ensure we have at least one reason
+        if not reasons:
+            reasons.append("Analysis based on trained ML model patterns")
+        
+        return reasons
     def predict_fraud(self, customer_id, amount, receiver_card, hour=None, timestamp=None):
-        """Predict fraud for a single transaction"""
+        """Predict fraud for a single transaction - FIXED VERSION"""
         
         if hour is None:
             hour = datetime.now().hour
@@ -500,15 +670,15 @@ class EnhancedFraudDetectorWrapper:
             # Get customer statistics
             customer_stats = self.get_customer_stats(customer_id)
             
-            # Calculate amount ratios
+            # Calculate amount ratios - FIXED: More sensitive to large amounts
             amount_to_avg_ratio = amount / max(customer_stats['avg_amount'], 1)
             amount_to_max_ratio = amount / max(customer_stats['max_amount'], 1)
             amount_z_score = abs(amount - customer_stats['avg_amount']) / max(customer_stats['std_amount'], 1)
             
-            # Get time features (now includes minute-level analysis)
+            # Get time features
             time_features = self.get_time_features(customer_id, hour, timestamp)
             
-            # Get card features (this will now vary based on card number)
+            # Get card features
             card_features = self.get_card_features(customer_id, receiver_card, amount, hour)
             
             # Store card features in result for later access
@@ -625,19 +795,22 @@ class EnhancedFraudDetectorWrapper:
             else:
                 predictions['rf_fraud_prob'] = 0.5
             
-            # Calculate composite fraud score
-            fraud_score = self.calculate_fraud_score(
+            # Calculate composite fraud score - FIXED VERSION
+            fraud_score = self.calculate_fraud_score_fixed(
                 predictions, amount_to_avg_ratio, amount_to_max_ratio, 
-                amount_z_score, time_features, card_features, customer_stats
+                amount_z_score, time_features, card_features, customer_stats, amount
             )
             
-            # Determine if fraud
-            is_fraud = fraud_score > self.threshold
+            # FIXED: Use dynamic threshold based on amount
+            dynamic_threshold = self.get_dynamic_threshold(amount, customer_stats)
+            
+            # Determine if fraud - FIXED LOGIC
+            is_fraud = fraud_score > dynamic_threshold
             
             # Generate reasons
-            reasons = self.generate_reasons(
+            reasons = self.generate_reasons_fixed(
                 predictions, amount_to_avg_ratio, time_features, 
-                card_features, fraud_score
+                card_features, fraud_score, amount, customer_stats
             )
             
             # Determine confidence
@@ -652,6 +825,7 @@ class EnhancedFraudDetectorWrapper:
                 'is_fraud': is_fraud,
                 'fraud_probability': fraud_score,
                 'confidence': confidence,
+                'threshold_used': dynamic_threshold,
                 'reasons': reasons,
                 'features_used': {
                     'amount_ratio': amount_to_avg_ratio,
@@ -689,6 +863,7 @@ class EnhancedFraudDetectorWrapper:
                 'is_fraud': False,
                 'fraud_probability': 0.5,
                 'confidence': 'LOW',
+                'threshold_used': 0.5,
                 'reasons': [f'Error in prediction: {str(e)}'],
                 'features_used': {},
                 'model_components': {},
@@ -710,107 +885,6 @@ class EnhancedFraudDetectorWrapper:
                     'formatted_datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
             }
-    
-    def calculate_fraud_score(self, predictions, amount_to_avg_ratio, amount_to_max_ratio, 
-                            amount_z_score, time_features, card_features, customer_stats):
-        """Calculate composite fraud score"""
-        
-        # ML models component (30%)
-        ml_score = (
-            0.4 * predictions['kmeans_high_risk'] + 
-            0.3 * predictions.get('dbscan_outlier', 0) + 
-            0.3 * predictions['isolation_anomaly']
-        )
-        
-        # Amount patterns component (25%)
-        amount_score = 0.0
-        if amount_to_avg_ratio > 5:
-            amount_score += 0.9
-        elif amount_to_avg_ratio > 3:
-            amount_score += 0.6
-        elif amount_to_avg_ratio > 2:
-            amount_score += 0.3
-            
-        if amount_z_score > 3:
-            amount_score += 0.8
-        elif amount_z_score > 2:
-            amount_score += 0.5
-            
-        amount_score = min(amount_score / 2, 1.0)
-        
-        # Time patterns component (20%)
-        time_score = (
-            0.4 * (time_features['hour_risk_score'] / 3.0) +
-            0.3 * time_features['is_high_risk_hour'] +
-            0.3 * (1.0 - time_features['time_pattern_consistency'])
-        )
-        time_score = min(time_score, 1.0)
-        
-        # Card patterns component (20%)
-        card_score = card_features['overall_card_risk']
-        if card_features['is_new_card']:
-            card_score = min(card_score * 1.5, 1.0)
-        
-        # Random Forest component (5%)
-        rf_score = predictions['rf_fraud_prob']
-        
-        # Weighted combination
-        fraud_score = (
-            0.30 * ml_score +
-            0.25 * amount_score +
-            0.20 * time_score +
-            0.20 * card_score +
-            0.05 * rf_score
-        )
-        
-        return max(min(fraud_score, 1.0), 0.0)
-    
-    def generate_reasons(self, predictions, amount_to_avg_ratio, time_features, 
-                        card_features, fraud_score):
-        """Generate human-readable reasons for the prediction"""
-        reasons = []
-        
-        if predictions['kmeans_high_risk']:
-            reasons.append("Transaction pattern matches high-risk cluster")
-        
-        if predictions['isolation_anomaly']:
-            reasons.append("Anomalous transaction detected by isolation forest")
-        
-        if amount_to_avg_ratio > 3:
-            reasons.append(f"Amount is {amount_to_avg_ratio:.1f}x higher than customer average")
-        
-        if time_features['is_high_risk_hour']:
-            reasons.append("Transaction during high-risk hours (late night/early morning)")
-        
-        if card_features['is_new_card']:
-            reasons.append("New receiver card for this customer")
-        
-        if predictions['rf_fraud_prob'] > 0.7:
-            reasons.append(f"Random Forest model indicates high fraud probability ({predictions['rf_fraud_prob']:.1%})")
-        
-        # Add card-specific reasons
-        if card_features.get('card_type_risk', 0.5) > 0.6:
-            reasons.append("High-risk card type detected")
-        
-        if card_features.get('pattern_risk', 0.5) > 0.6:
-            reasons.append("Unusual card number pattern detected")
-        
-        if card_features.get('is_suspicious_card'):
-            reasons.append("Card flagged as suspicious based on pattern analysis")
-        
-        if card_features.get('familiarity_score', 0.5) < 0.3:
-            reasons.append("Low familiarity score for this customer-card combination")
-        
-        if not reasons:
-            reasons.append("Analysis based on trained ML model patterns")
-        
-        # Add overall assessment
-        if fraud_score > 0.8:
-            reasons.append("Multiple high-risk factors detected")
-        elif fraud_score < 0.3:
-            reasons.append("Transaction appears consistent with customer patterns")
-        
-        return reasons
 
 # Model loading function
 @st.cache_resource
@@ -885,7 +959,7 @@ def create_fraud_visualization(result):
             'threshold': {
                 'line': {'color': "red", 'width': 4},
                 'thickness': 0.75,
-                'value': 50
+                'value': result.get('threshold_used', 50) * 100
             }
         }
     ))
@@ -906,14 +980,14 @@ def main():
     st.sidebar.header("📊 System Status")
     if model.is_loaded:
         st.sidebar.success("🟢 ML Model Loaded")
-        st.sidebar.info(f"🎯 Threshold: {model.threshold:.3f}")
+        st.sidebar.info(f"🎯 Base Threshold: {model.threshold:.3f}")
         st.sidebar.info(f"📊 Features: {len(model.features)}")
         if hasattr(model, 'load_status'):
             st.sidebar.info(f"📄 Load Status: {model.load_status}")
+        st.sidebar.warning("💡 Dynamic threshold adjusts based on transaction amount")
     else:
         st.sidebar.error("🔴 Model Not Loaded")
         st.sidebar.warning("Please upload your trained model file")
-    
     
     # File upload section
     if not model.is_loaded:
@@ -1024,14 +1098,18 @@ def main():
                 
                 # Display results
                 st.markdown("---")
+                threshold_used = result.get('threshold_used', 0.5)
+                
                 if result['is_fraud']:
                     st.error("🚨 **FRAUD DETECTED!**")
                     st.error(f"**Fraud Probability: {result['fraud_probability']:.1%}**")
                     st.error(f"**Confidence Level: {result['confidence']}**")
+                    st.error(f"**Dynamic Threshold Used: {threshold_used:.1%}**")
                 else:
                     st.success("✅ **Transaction Appears Safe**")
                     st.success(f"**Fraud Probability: {result['fraud_probability']:.1%}**")
                     st.success(f"**Confidence Level: {result['confidence']}**")
+                    st.info(f"**Dynamic Threshold Used: {threshold_used:.1%}**")
                 
                 # Model analysis
                 st.subheader("🤖 ML Model Analysis")
@@ -1072,6 +1150,7 @@ def main():
                     {"Field": "Receiver Card", "Value": f"{receiver_card[:4]}****{receiver_card[-4:]}"},
                     {"Field": "Transaction Time", "Value": transaction_time.get('formatted_datetime', 'N/A')},
                     {"Field": "Precise Time", "Value": transaction_time.get('formatted_time', 'N/A')},
+                    {"Field": "Dynamic Threshold", "Value": f"{threshold_used:.1%}"},
                     {"Field": "Risk Level", "Value": "🔴 HIGH" if result['fraud_probability'] > 0.7 else "🟡 MEDIUM" if result['fraud_probability'] > 0.3 else "🟢 LOW"}
                 ])
                 st.dataframe(transaction_df, use_container_width=True, hide_index=True)
@@ -1167,8 +1246,7 @@ def main():
             with col_metric2:
                 st.metric("Recall", "92.3%", "↑ 0.8%")
                 st.metric("F1-Score", "91.0%", "↑ 1.2%")
-            
-            # Model components status
+    
     # Usage Instructions
     if not model.is_loaded or 'result' not in locals():
         st.markdown("---")
@@ -1190,16 +1268,16 @@ def main():
             - **Customer ID**: Numeric identifier
             - **Amount**: Transaction amount in USD
             - **Card Number**: 12-19 digit number
-            - **Hour**: Transaction time (0-23)
+            - **Time**: Auto-detected current time
             """)
         
         with col_inst3:
             st.markdown("""
             ### 3️⃣ Get Results
             - **Fraud probability** percentage
+            - **Dynamic threshold** for large amounts
             - **Detailed analysis** reasons
             - **Model component** breakdown
-            - **Risk assessment** visualization
             """)
     
     # Footer
@@ -1209,8 +1287,8 @@ def main():
         <div style='text-align: center'>
             <p><strong>🛡️ Enhanced ML-Based Fraud Detection System</strong></p>
             <p>Using your trained EnhancedFraudDetector model with K-Means, Isolation Forest, Random Forest</p>
-            <p><em>Real-time fraud detection based on customer patterns and transaction behavior</em></p>
-            <p style='color: #888; font-size: 12px;'>Version 2.1 | Compatible with enhanced_defone_v21.pkl</p>
+            <p><em>Real-time fraud detection with dynamic thresholds for large transactions</em></p>
+            <p style='color: #888; font-size: 12px;'>Version 2.1 | Fixed Dynamic Threshold Logic | Compatible with enhanced_defone_v21.pkl</p>
         </div>
         """, 
         unsafe_allow_html=True
