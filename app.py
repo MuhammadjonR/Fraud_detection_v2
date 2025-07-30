@@ -6,16 +6,6 @@ import os
 from datetime import datetime, timedelta
 
 # Handle plotly import with graceful fallback
-PLOTLY_AVAILABLE = False
-try:
-    import plotly.express as px
-    import plotly.graph_objects as go
-    PLOTLY_AVAILABLE = True
-except Exception as e:
-    st.sidebar.warning(f"⚠️ Plotly unavailable - using alternative charts")
-    # Create placeholder objects to prevent errors
-    px = None
-    go = None
 
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
 from sklearn.preprocessing import StandardScaler, RobustScaler
