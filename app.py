@@ -1095,8 +1095,6 @@ def main():
         if 'result' in locals() and result:
             # Fraud probability visualization
             fig_gauge = create_fraud_visualization(result)
-            if fig_gauge and PLOTLY_AVAILABLE:
-                st.plotly_chart(fig_gauge, use_container_width=True)
             
             # Risk level indicator
             fraud_prob = result['fraud_probability']
@@ -1109,21 +1107,6 @@ def main():
             
             st.markdown(f"## {risk_level}")
             
-            # Component breakdown chart
-            st.subheader("🔍 Model Components")
-            components = result.get('model_components', {})
-            
-            fig_components = create_component_chart(components)
-            if fig_components and PLOTLY_AVAILABLE:
-                st.plotly_chart(fig_components, use_container_width=True)
-            
-            # Feature importance
-            st.subheader("📊 Key Risk Factors")
-            features = result.get('features_used', {})
-            
-            fig_risk = create_risk_factors_chart(features)
-            if fig_risk and PLOTLY_AVAILABLE:
-                st.plotly_chart(fig_risk, use_container_width=True)
         
         else:
             st.info("👆 Enter transaction details to see analysis")
